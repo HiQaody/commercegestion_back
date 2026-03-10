@@ -1,9 +1,10 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document } from 'mongoose';
+import { Document, Model } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 
 export type UserDocument = User & Document;
 
+// ==================== ENUMS ====================
 export enum UserType {
   PARTICULIER = 'Particulier',
   PROFESSIONNEL = 'Professionnel',
@@ -12,7 +13,6 @@ export enum UserType {
 
 export enum UserAccess {
   UTILISATEUR = 'Utilisateur',
-  MODERATEUR = 'Moderateur',
   ADMIN = 'Admin',
 }
 
@@ -45,10 +45,10 @@ export class User {
   @Prop()
   userPhone: string;
 
-  @Prop({ default: 'Particulier' })
+  @Prop({ default: UserType.PARTICULIER })
   userType: string;
 
-  @Prop({ default: 'Utilisateur' })
+  @Prop({ default: UserAccess.UTILISATEUR })
   userAccess: string;
 
   @Prop({ default: 0 })
@@ -70,9 +70,9 @@ export class User {
   @Prop()
   userMainLng?: number;
 
-  // ==================== PROFILE ====================
-  @Prop({ unique: true, sparse: true })
-  userId: string; // Custom user ID
+  // ==================== PROFILE & PARRAINAGE ====================
+  @Prop({ unique: true, sparse: true, index: true })
+  userId: string; // ID de 8 caractères pour le parrainage
 
   @Prop()
   userImage: string;
@@ -88,7 +88,7 @@ export class User {
   identityDocument?: string[];
 
   @Prop()
-  documentType?: string; // 'cin', 'passport', etc.
+  documentType?: string;
 
   // ==================== INFORMATIONS PROFESSIONNELLES ====================
   @Prop()
@@ -112,11 +112,18 @@ export class User {
   @Prop()
   logo?: string;
 
-  @Prop()
-  carteStat?: string;
+  @Prop({ type: [String], default: [] })
+  carteStat?: string[];
 
   @Prop({ type: [String], default: [] })
-  carteFiscal?: string[]; // Array of file names
+  carteFiscal?: string[];
+
+  // ==================== PASSWORD RESET ====================
+  @Prop({ default: null })
+  resetPasswordToken?: string;
+
+  @Prop({ default: null })
+  resetPasswordExpires?: Date;
 
   // ==================== PARRAINAGE ====================
   @Prop()
@@ -125,34 +132,74 @@ export class User {
   @Prop()
   parrain2ID?: string;
 
-  // ==================== SOFT DELETE CREATE UPDATE ====================
+  // À ajouter dans votre classe User
+  @Prop({ default: false })
+  isParrain1Validated: boolean;
+
+  @Prop({ default: false })
+  isParrain2Validated: boolean;
+
+  @Prop()
+  parrain1Token?: string;
+
+  @Prop()
+  parrain2Token?: string;
+
+  // ==================== SOFT DELETE & TIMESTAMPS ====================
   @Prop({ default: null })
   deletedAt?: Date;
-
-  @Prop({ default: null })
-  createdAt?: Date;
-
-  @Prop({ default: null })
-  updatedAt?: Date;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);
 
 /**
- * Hash password avant sauvegarde
+ * Générateur d'ID court (8 caractères)
  */
-UserSchema.pre<UserDocument>('save', async function () {
-  if (!this.isModified('userPassword')) return;
-  const salt = await bcrypt.genSalt(10);
-  this.userPassword = await bcrypt.hash(this.userPassword, salt);
-});
+function generateShortId(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Pas de 0, O, I, 1, L
+  let result = '';
+  for (let i = 0; i < 8; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
 
 /**
- * Index partiel (soft delete friendly)
+ * Middleware Pre-Save : Hashage et ID Unique
  */
+UserSchema.pre<UserDocument>('save', async function () {
+  // 1. Hashage du mot de passe
+  if (this.isModified('userPassword')) {
+    const salt = await bcrypt.genSalt(10);
+    this.userPassword = await bcrypt.hash(this.userPassword, salt);
+  }
+
+  // 2. Génération/Correction du userId (8 chars)
+  // On génère si c'est nouveau OU si l'ID existant n'est pas au format 8 caractères (ex: UUID)
+  if (this.isNew || (this.userId && this.userId.length !== 8)) {
+    let isUnique = false;
+    let attempts = 0;
+    const userModel = this.constructor as Model<UserDocument>;
+
+    while (!isUnique && attempts < 15) {
+      const candidateId = generateShortId();
+      const existing = await userModel
+        .findOne({ userId: candidateId })
+        .select('_id')
+        .lean()
+        .exec();
+
+      if (!existing) {
+        this.userId = candidateId;
+        isUnique = true;
+      }
+      attempts++;
+    }
+  }
+});
+
 UserSchema.index(
   { userEmail: 1 },
   { unique: true, partialFilterExpression: { deletedAt: null } },
 );
-
 UserSchema.index({ userId: 1 }, { unique: true, sparse: true });

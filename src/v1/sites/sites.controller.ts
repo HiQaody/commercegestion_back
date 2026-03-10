@@ -27,7 +27,7 @@ import { Auth } from '../auth';
 import { LoggerService } from 'src/common/logger/logger.service';
 
 @ApiTags('Sites')
-@Controller('sites')
+@Controller()
 export class SiteController {
   constructor(
     private readonly siteService: SiteService,
@@ -145,5 +145,13 @@ export class SiteController {
     @Query('limit', new ParseIntPipe({ optional: true })) limit = 10,
   ): Promise<PaginationResult<Site>> {
     return this.siteService.findByLocation(lat, lng, radiusKm, page, limit);
+  }
+
+  @Get('select/all')
+  @ApiOperation({ summary: 'Récupérer tous les sites (sans pagination)' })
+  @ApiResponse({ status: 200, description: 'Liste de tous les sites' })
+  async findAllSelect() {
+    const sites = await this.siteService.findAllSelect();
+    return sites;
   }
 }
