@@ -19,9 +19,9 @@ import * as fs from 'node:fs';
 import { MailService } from 'src/shared/mail/mail.service';
 import { UserVerificationToken } from './user-verification.schema';
 import { ConfigService } from '@nestjs/config';
-import { NotifyHelper } from 'src/shared/helpers/notify.helper';
 import { SiteService } from '../sites/sites.service';
 import { NotificationsService } from 'src/shared/notifications/notifications.service';
+import { LoggerService } from 'src/common/logger/logger.service';
 
 @Injectable()
 export class UsersService implements OnModuleInit {
@@ -38,8 +38,8 @@ export class UsersService implements OnModuleInit {
     private readonly mailService: MailService,
     @Inject(forwardRef(() => SiteService))
     private readonly siteService: SiteService,
-    private readonly notifyHelper: NotifyHelper,
     private readonly socketNotifications: NotificationsService,
+    private readonly logger: LoggerService,
   ) {
     this.baseUrl =
       this.configService.get<string>('APP_URL') || 'http://localhost:3000';
@@ -76,55 +76,99 @@ export class UsersService implements OnModuleInit {
     files: any = {},
   ): Promise<PaginationResult<User>> {
     const uploadedFiles: string[] = [];
-
+    const userEmail = dto.userEmail.toLowerCase();
     try {
-      const exists = await this.userModel.findOne({
-        userEmail: dto.userEmail.toLowerCase(),
+      // 1. Vérification d'existence rapide (on ne récupère que l'ID)
+      const exists = await this.userModel.exists({
+        userEmail,
         deletedAt: null,
       });
       if (exists) throw new ConflictException('Email déjà utilisé');
 
-      // Uploads
+      // Helper pour upload sécurisé
       const safeUpload = async (file: any, folder: string) => {
         const path = await this.uploadService.saveFile(file, folder);
         if (path) uploadedFiles.push(path);
         return path;
       };
 
-      const [avatarPath, logoPath] = await Promise.all([
-        files.avatar ? safeUpload(files.avatar, 'avatars') : null,
-        files.logo ? safeUpload(files.logo, 'logos') : null,
-      ]);
+      // Uploads individuels
+      const avatarPath = files.avatar
+        ? await safeUpload(files.avatar, 'avatars')
+        : null;
+      const logoPath = files.logo
+        ? await safeUpload(files.logo, 'logos')
+        : null;
 
-      // Création de l'utilisateur avec tokens de parrainage
+      // Uploads multiples (toujours tableau)
+      const carteStatPath =
+        files.carteStat && Array.isArray(files.carteStat)
+          ? await Promise.all(
+              files.carteStat.map((stat: any) =>
+                safeUpload(stat, 'carteStat').catch((err) => {
+                  console.error('Erreur upload carte stat:', err);
+                  return null;
+                }),
+              ),
+            )
+          : [];
+
+      const carteFiscalPath =
+        files.carteFiscal && Array.isArray(files.carteFiscal)
+          ? await Promise.all(
+              files.carteFiscal.map((fiscal: any) =>
+                safeUpload(fiscal, 'carteFiscal').catch((err) => {
+                  console.error('Erreur upload carte fiscale:', err);
+                  return null;
+                }),
+              ),
+            )
+          : [];
+
+      const documentsPaths =
+        files.documents && Array.isArray(files.documents)
+          ? await Promise.all(
+              files.documents.map((doc: any) =>
+                safeUpload(doc, 'documents').catch((err) => {
+                  console.error('Erreur upload document:', err);
+                  return null;
+                }),
+              ),
+            )
+          : [];
+
+      // 4. Création de l'utilisateur
+      const generateToken = () => randomBytes(32).toString('hex');
+
       const user = new this.userModel({
         ...dto,
-        userEmail: dto.userEmail.toLowerCase(),
+        userEmail,
         userImage: avatarPath,
         logo: logoPath,
+        carteStat: carteStatPath,
+        carteFiscal: carteFiscalPath,
+        identityDocument: documentsPaths,
         userValidated: false,
         userEmailVerified: false,
-        parrain1Token: dto.parrain1ID ? randomBytes(32).toString('hex') : null,
-        parrain2Token: dto.parrain2ID ? randomBytes(32).toString('hex') : null,
+        parrain1Token: dto.parrain1ID ? generateToken() : null,
+        parrain2Token: dto.parrain2ID ? generateToken() : null,
         isParrain1Validated: false,
         isParrain2Validated: false,
       });
 
       await user.save();
 
-      // Token de vérification email (standard)
-      const verifyToken = randomBytes(32).toString('hex');
-      const expiresAt = new Date();
-      expiresAt.setHours(expiresAt.getHours() + 24);
+      // 5. Token de vérification
+      const verifyToken = generateToken();
       await this.verificationTokenModel.create({
         userId: user._id,
         token: verifyToken,
-        expiresAt,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       });
 
-      // Tâches de fond
+      // 6. Tâches de fond (Email + Site)
       this.runBackgroundTasks(user, verifyToken).catch((err) =>
-        console.error(err),
+        console.error('[BackgroundTasks Error]:', err),
       );
 
       return {
@@ -133,9 +177,10 @@ export class UsersService implements OnModuleInit {
         data: [user],
       };
     } catch (err) {
-      for (const f of uploadedFiles) {
-        if (fs.existsSync(f)) fs.unlinkSync(f);
-      }
+      // 7. Cleanup asynchrone en cas d'erreur
+      await Promise.all(
+        uploadedFiles.map((path) => fs.promises.unlink(path).catch(() => null)),
+      );
       throw err;
     }
   }
@@ -154,25 +199,26 @@ export class UsersService implements OnModuleInit {
       // Envoi des emails aux parrains
       if (user.parrain1ID && user.parrain1Token) {
         const p1 = await this.getInfoParrain(user.parrain1ID);
+        console.log('Parrain 1:', p1, 'Token:', user.parrain1Token);
         if (p1) {
           tasks.push(
             this.mailService.sendParrainValidationEmail(
               p1.userEmail,
               user.userName,
-              `${this.baseUrl}/api/v1/users/validate-parrain?token=${user.parrain1Token}`,
+              `${this.frontendUrl}/login`,
             ),
           );
         }
       }
-
       if (user.parrain2ID && user.parrain2Token) {
         const p2 = await this.getInfoParrain(user.parrain2ID);
+        console.log('Parrain 2:', p2, 'Token:', user.parrain2Token);
         if (p2) {
           tasks.push(
             this.mailService.sendParrainValidationEmail(
               p2.userEmail,
               user.userName,
-              `${this.baseUrl}/api/v1/users/validate-parrain?token=${user.parrain2Token}`,
+              `${this.frontendUrl}/login`,
             ),
           );
         }
@@ -222,6 +268,55 @@ export class UsersService implements OnModuleInit {
     return `${this.frontendUrl}/login?status=validated`;
   }
 
+  async validateParrain(
+    userId: string,
+    parrainId: string,
+  ): Promise<PaginationResult<User>> {
+    const user = await this.userModel.findById(userId);
+    if (!user) throw new NotFoundException('Utilisateur non trouvé');
+
+    if (user.userValidated) {
+      throw new BadRequestException('Le compte est déjà validé');
+    }
+
+    let isMatch = false;
+
+    // Comparaison sécurisée des IDs (ObjectId vs String)
+    if (user.parrain1ID?.toString() === parrainId) {
+      user.isParrain1Validated = true;
+      user.parrain1Token = undefined;
+      isMatch = true;
+    } else if (user.parrain2ID?.toString() === parrainId) {
+      user.isParrain2Validated = true;
+      user.parrain2Token = undefined;
+      isMatch = true;
+    }
+
+    if (!isMatch) {
+      throw new BadRequestException(
+        'Vous n’êtes pas le parrain de cet utilisateur',
+      );
+    }
+
+    // Vérification de la validation globale
+    const p1Ok = user.parrain1ID ? user.isParrain1Validated : true;
+    const p2Ok = user.parrain2ID ? user.isParrain2Validated : true;
+
+    if (p1Ok && p2Ok) {
+      user.userValidated = true;
+      // On attend la notification avant ou après le save selon votre besoin de consistance
+      await this.activateAccountNotify(user);
+    }
+
+    await user.save();
+
+    return {
+      status: 'success',
+      message: 'Parrainage validé',
+      data: [user],
+    };
+  }
+
   private async activateAccountNotify(user: UserDocument) {
     await Promise.all([
       this.socketNotifications.notifyUser(
@@ -245,29 +340,89 @@ export class UsersService implements OnModuleInit {
     search?: string,
     sortBy = 'createdAt',
     order: 'asc' | 'desc' = 'desc',
-    filter?: any,
+    filter: any = {},
   ): Promise<PaginationResult<User>> {
-    const query: any = { deletedAt: null };
-    if (search) {
-      const regex = new RegExp(search, 'i');
-      query.$or = [
-        { userEmail: regex },
-        { userName: regex },
-        { userId: regex },
-      ];
-    }
+    const allowedSortFields = ['createdAt', 'userName', 'userEmail'];
+    const sortField = allowedSortFields.includes(sortBy) ? sortBy : 'createdAt';
+
+    const query = this.buildUserQuery(search, filter);
+
     const skip = (page - 1) * limit;
+
+    const [data, total, totalUserActif, totalAdmin] = await Promise.all([
+      this.userModel
+        .find(query)
+        .select('-userPassword')
+        .sort({ [sortField]: order === 'asc' ? 1 : -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+
+      this.userModel.countDocuments(query),
+
+      this.userModel.countDocuments({
+        ...query,
+        userValidated: true,
+      }),
+
+      this.userModel.countDocuments({
+        ...query,
+        userAccess: 'Admin',
+      }),
+    ]);
+
+    return {
+      status: 'success',
+      message: 'OK',
+      data,
+      total,
+      totalUserActif,
+      totalAdmin,
+      page,
+      limit,
+    };
+  }
+
+  async findAllByFilsPaginated(
+    userIdPartager: string,
+    page = 1,
+    limit = 10,
+    search?: string,
+    sortBy = 'createdAt',
+    order: 'asc' | 'desc' = 'desc',
+    filter: any = {},
+  ): Promise<PaginationResult<User>> {
+    const allowedSortFields = ['createdAt', 'userName', 'userEmail'];
+    const sortField = allowedSortFields.includes(sortBy) ? sortBy : 'createdAt';
+
+    const referralFilter = {
+      $or: [{ parrain1ID: userIdPartager }, { parrain2ID: userIdPartager }],
+    };
+
+    const query = this.buildUserQuery(search, { ...filter, ...referralFilter });
+
+    const skip = (page - 1) * limit;
+
     const [data, total] = await Promise.all([
       this.userModel
         .find(query)
         .select('-userPassword')
-        .sort({ [sortBy]: order === 'asc' ? 1 : -1 })
+        .sort({ [sortField]: order === 'asc' ? 1 : -1 })
         .skip(skip)
         .limit(limit)
-        .exec(),
+        .lean(),
+
       this.userModel.countDocuments(query),
     ]);
-    return { status: 'success', message: 'OK', data, total, page, limit };
+
+    return {
+      status: 'success',
+      message: 'Liste des utilisateurs de vos filleuls',
+      data,
+      total,
+      page,
+      limit,
+    };
   }
 
   async findOne(id: string): Promise<PaginationResult<User>> {
@@ -294,24 +449,59 @@ export class UsersService implements OnModuleInit {
     return { status: 'success', message: 'Mis à jour', data: [updated] };
   }
 
+  //Supprimer definitivement un utilisateur (Admin)
   async remove(id: string): Promise<PaginationResult<null>> {
     const user = await this.userModel.findById(id);
     if (!user) throw new NotFoundException('Non trouvé');
-    user.deletedAt = new Date();
-    await user.save();
+    await user.deleteOne();
     return { status: 'success', message: 'Supprimé', data: null };
   }
 
   async verifyAccountToken(token: string): Promise<string> {
-    const tokenDoc = await this.verificationTokenModel.findOne({ token });
-    if (!tokenDoc || tokenDoc.expiresAt < new Date())
-      throw new BadRequestException('Token invalide');
-    await this.userModel.updateOne(
-      { _id: tokenDoc.userId },
-      { userEmailVerified: true },
-    );
-    await tokenDoc.deleteOne();
-    return `${this.frontendUrl}/login?verified=true`;
+    const buildRedirectUrl = (verified: boolean, reason?: string): string => {
+      const params = new URLSearchParams({ verified: String(verified) });
+      if (reason) params.set('reason', reason);
+      return `${this.frontendUrl}/login?${params.toString()}`;
+    };
+
+    if (!token?.trim()) {
+      return buildRedirectUrl(false, 'missing_token');
+    }
+
+    try {
+      const tokenDoc = await this.verificationTokenModel
+        .findOne({ token })
+        .exec();
+
+      if (!tokenDoc) {
+        return buildRedirectUrl(false, 'invalid_token');
+      }
+
+      if (tokenDoc.expiresAt < new Date()) {
+        await tokenDoc.deleteOne();
+        return buildRedirectUrl(false, 'expired_token');
+      }
+
+      const result = await this.userModel.updateOne(
+        { _id: tokenDoc.userId },
+        { userEmailVerified: true },
+      );
+
+      if (result.modifiedCount === 0) {
+        this.logger.debug(
+          'Warning',
+          `Utilisateur introuvable pour le token: ${tokenDoc.userId}`,
+        );
+        return buildRedirectUrl(false, 'user_not_found');
+      }
+
+      await tokenDoc.deleteOne();
+
+      return buildRedirectUrl(true);
+    } catch (error) {
+      this.logger.error('Erreur de vérification du compte:', error);
+      return buildRedirectUrl(false, 'server_error');
+    }
   }
 
   /**
@@ -501,8 +691,40 @@ export class UsersService implements OnModuleInit {
     }
   }
 
-async getInfoParrain(userId: string): Promise<UserDocument | null> {
-  // Utilisation de findOne car l'userId est unique
-  return this.userModel.findOne({ userId: userId }).exec();
-}
+  async getInfoParrain(userId: string): Promise<UserDocument | null> {
+    // Utilisation de findOne car l'userId est unique
+    return this.userModel.findOne({ userId: userId }).exec();
+  }
+
+  private buildUserQuery(search?: string, extraFilter: any = {}) {
+    // 1. Extraire et transformer les filtres spécifiques
+    const { isActive, isVerified, ...rest } = extraFilter;
+
+    const query: any = {
+      deletedAt: null,
+      ...rest, // Inclut les autres filtres comme userType
+    };
+
+    // Mappage : isActive -> userValidated
+    if (isActive !== undefined) {
+      query.userValidated = isActive;
+    }
+
+    // Mappage : isVerified -> userEmailVerified
+    if (isVerified !== undefined) {
+      query.userEmailVerified = isVerified;
+    }
+
+    // 2. Logique de recherche (Regex)
+    if (search) {
+      const regex = new RegExp(search, 'i');
+      query.$or = [
+        { userEmail: regex },
+        { userName: regex },
+        { userId: regex },
+      ];
+    }
+
+    return query;
+  }
 }

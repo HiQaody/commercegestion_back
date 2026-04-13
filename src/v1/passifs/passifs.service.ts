@@ -78,6 +78,42 @@ export class PassifsService {
   }
 
   /**
+   * Diminue le passif en spécifiant le créancier
+   * Utilisé lors d'un RETOUR pour diminuer la dette envers un créancier spécifique
+   */
+  async decreasePassifByCreditor(
+    detentaireId: string,
+    productId: string,
+    creancierId: string,
+    quantite: number,
+  ) {
+    const passif = await this.passifModel.findOne({
+      userId: new Types.ObjectId(detentaireId),
+      productId: new Types.ObjectId(productId),
+      creancierId: new Types.ObjectId(creancierId),
+      isActive: true,
+    });
+
+    if (!passif || passif.quantite < quantite) {
+      // La dette peut être inférieure ou inexistante
+      // Ce cas peut survenir lors d'un retour partiel
+      console.warn(
+        `Passif insuffisant or not found for decreasing: detentaire=${detentaireId}, product=${productId}, creditor=${creancierId}, requested=${quantite}`,
+      );
+      return;
+    }
+
+    passif.quantite -= quantite;
+
+    if (passif.quantite === 0) {
+      passif.isActive = false;
+      passif.archivedAt = new Date();
+    }
+
+    return await passif.save();
+  }
+
+  /**
    * Transfert de créancier (Étape 4c).
    * Le détenteur ne change pas, mais il doit maintenant le produit à l'acheteur.
    */
@@ -125,5 +161,28 @@ export class PassifsService {
     }
 
     return passif;
+  }
+
+  /**
+   * Récupère tous les passifs d'un site sans pagination - pour utilisation en select
+   * Retourne: quantité, nom du produit et id du produit
+   */
+  async getAllPassifsByIdSite(siteId: string) {
+    return this.passifModel
+      .find({
+        depotId: new Types.ObjectId(siteId),
+        isActive: true,
+        quantite: { $gt: 0 },
+      })
+      .populate('productId', 'productName _id')
+      .select('quantite productId')
+      .exec()
+      .then((passifs) =>
+        passifs.map((p) => ({
+          quantite: p.quantite,
+          productId: (p.productId as any)?._id,
+          productName: (p.productId as any)?.productName,
+        })),
+      );
   }
 }

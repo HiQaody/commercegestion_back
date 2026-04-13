@@ -14,7 +14,7 @@ import {
   Res,
   Req,
   ForbiddenException,
-  NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -61,20 +61,63 @@ export class UsersController {
         'userPassword',
       ],
       properties: {
-        userNickName: { type: 'string', example: 'jacquinot' },
-        userName: { type: 'string', example: 'RANDRIANOMENJANAHARY' },
-        userFirstname: { type: 'string', example: 'Jacquinot' },
-        userEmail: { type: 'string', example: 'jacquinot@gmail.com' },
-        userPassword: { type: 'string', example: 'StrongPassword123' },
-        userPhone: { type: 'string', example: '+261340179345' },
+        userNickName: {
+          type: 'string',
+          example: 'jacquinot',
+          description: "Surnom ou pseudo de l'utilisateur",
+        },
+        userName: {
+          type: 'string',
+          example: 'RANDRIANOMENJANAHARY',
+          description: "Nom de famille de l'utilisateur",
+        },
+        userFirstname: {
+          type: 'string',
+          example: 'Jacquinot',
+          description: "Prénom de l'utilisateur",
+        },
+        userEmail: {
+          type: 'string',
+          example: 'jacquinot@gmail.com',
+          description: "Adresse email de l'utilisateur",
+        },
+        userPassword: {
+          type: 'string',
+          example: 'StrongPassword123',
+          description: "Mot de passe de l'utilisateur",
+        },
+        userPhone: {
+          type: 'string',
+          example: '+261340179345',
+          description: "Numéro de téléphone de l'utilisateur",
+        },
+        userDateOfBirth: {
+          type: 'string',
+          format: 'date',
+          example: '1990-01-01',
+          description: "Date de naissance de l'utilisateur",
+        },
         userType: {
           type: 'string',
           enum: Object.values(UserType),
           example: 'Particulier',
+          description: "Type d'utilisateur (Particulier, Entreprise)",
         },
-        userAddress: { type: 'string', example: 'Andrainjato, Fianarantsoa' },
-        userMainLat: { type: 'number', example: -21.45267 },
-        userMainLng: { type: 'number', example: 47.08569 },
+        userAddress: {
+          type: 'string',
+          example: 'Andrainjato, Fianarantsoa',
+          description: "Adresse principale de l'utilisateur",
+        },
+        userMainLat: {
+          type: 'number',
+          example: -21.45267,
+          description: "Latitude de l'adresse principale",
+        },
+        userMainLng: {
+          type: 'number',
+          example: 47.08569,
+          description: "Longitude de l'adresse principale",
+        },
         identityCardNumber: {
           type: 'string',
           example: '201011000123',
@@ -84,6 +127,7 @@ export class UsersController {
           type: 'string',
           enum: ['cin', 'passport', 'permis-de-conduire'],
           example: 'cin',
+          description: 'Type de document d’identité fourni',
         },
         avatar: {
           type: 'string',
@@ -119,6 +163,8 @@ export class UsersController {
           type: 'string',
           format: 'email',
           example: 'manager@entreprise.com',
+          description:
+            "Email du gérant (obligatoire si userType = 'Entreprise')",
         },
         parrain1ID: {
           type: 'string',
@@ -142,7 +188,7 @@ export class UsersController {
       [
         { name: 'avatar', maxCount: 1 },
         { name: 'logo', maxCount: 1 },
-        { name: 'carteStat', maxCount: 2 },
+        { name: 'carteStat', maxCount: 5 },
         { name: 'documents', maxCount: 5 },
         { name: 'carteFiscal', maxCount: 5 },
       ],
@@ -160,20 +206,39 @@ export class UsersController {
       carteFiscal?: Express.Multer.File[];
     },
   ) {
+    // Sécurité : si aucun fichier n'est envoyé, 'files' peut être undefined
+    const safeFiles = files || {};
+
+    const carteStatCount = safeFiles.carteStat ? safeFiles.carteStat.length : 0;
+    const documentsCount = safeFiles.documents ? safeFiles.documents.length : 0;
+    const carteFiscalCount = safeFiles.carteFiscal
+      ? safeFiles.carteFiscal.length
+      : 0;
+
+    console.log(
+      `Received files - Avatar: ${safeFiles.avatar ? safeFiles.avatar.length : 0}, Logo: ${safeFiles.logo ? safeFiles.logo.length : 0}, CarteStat: ${carteStatCount}, Documents: ${documentsCount}, CarteFiscal: ${carteFiscalCount}`,
+    );
+
     return this.usersService.createWithFiles(dto, {
-      avatar: files.avatar?.[0],
-      logo: files.logo?.[0],
-      carteStat: files.carteStat,
-      documents: files.documents,
-      carteFiscal: files.carteFiscal,
+      avatar: safeFiles.avatar?.[0], // On prend le premier pour les champs uniques
+      logo: safeFiles.logo?.[0],
+      carteStat: safeFiles.carteStat || [], // Tableau vide par défaut
+      documents: safeFiles.documents || [],
+      carteFiscal: safeFiles.carteFiscal || [],
     });
   }
 
   // ========================= VALIDATE PARRAINAGE TOKEN =========================
-  @Get('validate-parrain')
-  async validateParrain(@Query('token') token: string, @Res() res) {
-    const redirectUrl = await this.usersService.validateByParrainToken(token);
-    return res.redirect(redirectUrl);
+  @Post('validate-parrain/:id')
+  @ApiOperation({
+    summary: 'Valider le parrainage par _id du filleul',
+    description:
+      'Validation du parrainage en cliquant sur la bouton approuver dans la liste du filleul. **Nécessite d’être connecté et d’être le parrain concerné.**',
+  })
+  @ApiParam({ name: 'id', example: '64d2f3b9e7b9c9b1f1c12345' })
+  @Auth()
+  async validateParrain(@Req() req, @Param('id') id: string) {
+    return await this.usersService.validateParrain(id, req.user.userIdPartager);
   }
 
   // ========================= FIND ONE =========================
@@ -199,9 +264,116 @@ export class UsersController {
     schema: {
       type: 'object',
       properties: {
-        userNickName: { type: 'string' },
-        userPhone: { type: 'string', example: '+261320011122' },
-        avatar: { type: 'string', format: 'binary' },
+        userNickName: {
+          type: 'string',
+          example: 'jacquinot',
+          description: "Surnom ou pseudo de l'utilisateur",
+        },
+        userName: {
+          type: 'string',
+          example: 'RANDRIANOMENJANAHARY',
+          description: "Nom de famille de l'utilisateur",
+        },
+        userFirstname: {
+          type: 'string',
+          example: 'Jacquinot',
+          description: "Prénom de l'utilisateur",
+        },
+        userPassword: {
+          type: 'string',
+          example: 'StrongPassword123',
+          description: "Mot de passe de l'utilisateur",
+        },
+        userPhone: {
+          type: 'string',
+          example: '+261340179345',
+          description: "Numéro de téléphone de l'utilisateur",
+        },
+        userDateOfBirth: {
+          type: 'string',
+          format: 'date',
+          example: '1990-01-01',
+          description: "Date de naissance de l'utilisateur",
+        },
+        userType: {
+          type: 'string',
+          enum: Object.values(UserType),
+          example: 'Particulier',
+          description: "Type d'utilisateur (Particulier, Entreprise)",
+        },
+        userAddress: {
+          type: 'string',
+          example: 'Andrainjato, Fianarantsoa',
+          description: "Adresse principale de l'utilisateur",
+        },
+        userMainLat: {
+          type: 'number',
+          example: -21.45267,
+          description: "Latitude de l'adresse principale",
+        },
+        userMainLng: {
+          type: 'number',
+          example: 47.08569,
+          description: "Longitude de l'adresse principale",
+        },
+        identityCardNumber: {
+          type: 'string',
+          example: '201011000123',
+          description: 'Numéro CIN ou Passport',
+        },
+        documentType: {
+          type: 'string',
+          enum: ['cin', 'passport', 'permis-de-conduire'],
+          example: 'cin',
+          description: 'Type de document d’identité fourni',
+        },
+        avatar: {
+          type: 'string',
+          format: 'binary',
+          description: 'Photo de profil',
+        },
+        logo: {
+          type: 'string',
+          format: 'binary',
+          description: 'Logo pour les entreprises',
+        },
+        carteStat: {
+          type: 'array',
+          items: { type: 'string', format: 'binary' },
+          description: 'Image de la carte statistique( recto/verso)',
+        },
+        documents: {
+          type: 'array',
+          items: { type: 'string', format: 'binary' },
+          description: 'Documents complémentaires (max 5)',
+        },
+        carteFiscal: {
+          type: 'array',
+          items: { type: 'string', format: 'binary' },
+          description: 'Justificatifs fiscaux (NIF)',
+        },
+        managerName: {
+          type: 'string',
+          example: 'Jean Dupont',
+          description: "Nom du gérant (obligatoire si userType = 'Entreprise')",
+        },
+        managerEmail: {
+          type: 'string',
+          format: 'email',
+          example: 'manager@entreprise.com',
+          description:
+            "Email du gérant (obligatoire si userType = 'Entreprise')",
+        },
+        parrain1ID: {
+          type: 'string',
+          example: 'XJ8K2P9W',
+          description: 'Code de parrainage (8 caractères) du premier parrain',
+        },
+        parrain2ID: {
+          type: 'string',
+          example: 'L4N7M1Q5',
+          description: 'Code de parrainage (8 caractères) du deuxième parrain',
+        },
       },
     },
   })
@@ -232,7 +404,7 @@ export class UsersController {
     return this.usersService.update(id, dto, {
       avatar: files.avatar?.[0],
       logo: files.logo?.[0],
-      carteStat: files.carteStat?.[0],
+      carteStat: files.carteStat,
       documents: files.documents,
       carteFiscal: files.carteFiscal,
     });
@@ -262,17 +434,25 @@ export class UsersController {
 
   // ========================= VERIFY ACCOUNT SECURISE =========================
   @Get('verify')
-  @ApiOperation({
-    summary: "Vérifier l'adresse email et rediriger",
+  @ApiOperation({ summary: "Vérifier l'adresse email et rediriger" })
+  @ApiQuery({
+    name: 'token',
+    required: true,
+    description: 'Jeton de sécurité unique',
   })
-  @ApiQuery({ name: 'token', description: 'Jeton de sécurité unique' })
-  @ApiResponse({ status: 302 })
+  @ApiResponse({ status: 302, description: 'Redirection vers le frontend' })
+  @ApiResponse({ status: 400, description: 'Token manquant' })
+  @HttpCode(HttpStatus.FOUND)
   async verifyAccount(
     @Query('token') token: string,
     @Res() res: express.Response,
   ) {
+    if (!token?.trim()) {
+      throw new BadRequestException('Token manquant');
+    }
+
     const redirectUrl = await this.usersService.verifyAccountToken(token);
-    return res.redirect(redirectUrl);
+    return res.redirect(HttpStatus.FOUND, redirectUrl);
   }
 
   // ========================= ACTIVATE ACCOUNT =========================
@@ -288,12 +468,79 @@ export class UsersController {
     return this.usersService.activateAccount(id);
   }
 
+  @Patch('toggle-role/:id')
+  @AuthRole(UserAccess.ADMIN)
+  @ApiOperation({ summary: 'Basculer rôle ADMIN/UTILISATEUR' })
+  toggleRole(@Param('id') id: string) {
+    return this.usersService.toggleAdminRole(id);
+  }
+
+  @Get('select/all')
+  @ApiOperation({ summary: 'Liste de tous les utilisateurs (sans pagination)' })
+  findAll() {
+    return this.usersService.findAllNoPaginated();
+  }
+
+  /**
+   * Récupérer tous les utilisateurs qui ont choisi l’utilisateur courant comme parrain
+   */
+  @Get('me/referrals')
+  @Auth()
+  @ApiOperation({
+    summary: 'Liste paginée des filleuls',
+    description:
+      "Retourne les utilisateurs ayant choisi l'utilisateur courant comme parrain.",
+  })
+  @ApiQuery({ name: 'page', required: false, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, example: 10 })
+  @ApiQuery({
+    name: 'search',
+    required: false,
+    description: 'Recherche par nom ou email',
+  })
+  @ApiQuery({ name: 'userType', required: false, enum: UserType })
+  @ApiQuery({ name: 'isActive', required: false, type: Boolean })
+  @ApiQuery({ name: 'isVerified', required: false, type: Boolean })
+  async findAllReferrals(@Req() req: any, @Query() query: UsersQueryDto) {
+    const {
+      page = '1',
+      limit = '10',
+      search,
+      sortBy = 'createdAt',
+      order = 'desc',
+      userType,
+      isActive,
+      isVerified,
+    } = query;
+
+    const filter = {
+      ...(userType && { userType }),
+      isActive:
+        isActive === undefined ? undefined : String(isActive) === 'true',
+      isVerified:
+        isVerified === undefined ? undefined : String(isVerified) === 'true',
+    };
+
+    // Nettoyer les undefined pour ne pas polluer la query
+    Object.keys(filter).forEach(
+      (key) => filter[key] === undefined && delete filter[key],
+    );
+
+    return this.usersService.findAllByFilsPaginated(
+      req.user.userIdPartager,
+      Number(page),
+      Number(limit),
+      search,
+      sortBy,
+      order,
+      filter,
+    );
+  }
+
   // ========================= PAGINATED FIND =========================
   @Get()
   @ApiOperation({
-    summary: 'Recherche et Pagination avancée',
-    description:
-      "Recherche multicritère : par nom, type d'utilisateur (Particulier/Entreprise) ou statut (Actif/Vérifié).",
+    summary: 'Recherche et pagination des utilisateurs',
   })
   @ApiQuery({ name: 'page', required: false, example: 1 })
   @ApiQuery({ name: 'limit', required: false, example: 10 })
@@ -316,13 +563,20 @@ export class UsersController {
       isActive,
       isVerified,
     } = query;
+
     const filter = {
-      userType,
+      ...(userType && { userType }),
       isActive:
         isActive === undefined ? undefined : String(isActive) === 'true',
       isVerified:
         isVerified === undefined ? undefined : String(isVerified) === 'true',
     };
+
+    // Nettoyer les undefined pour ne pas polluer la query
+    Object.keys(filter).forEach(
+      (key) => filter[key] === undefined && delete filter[key],
+    );
+
     return this.usersService.findAllPaginated(
       Number(page),
       Number(limit),
@@ -332,18 +586,4 @@ export class UsersController {
       filter,
     );
   }
-
-  @Patch('toggle-role/:id')
-  @AuthRole(UserAccess.ADMIN)
-  @ApiOperation({ summary: 'Basculer rôle ADMIN/UTILISATEUR' })
-  toggleRole(@Param('id') id: string) {
-    return this.usersService.toggleAdminRole(id);
-  }
-
-  @Get('select/all')
-  @ApiOperation({ summary: 'Liste de tous les utilisateurs (sans pagination)' })
-  findAll() {
-    return this.usersService.findAllNoPaginated();
-  }
-
 }
