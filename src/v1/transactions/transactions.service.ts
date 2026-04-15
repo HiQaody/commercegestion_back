@@ -26,6 +26,7 @@ import { MailService } from '../../shared/mail/mail.service';
 import { ProductService } from '../products/products.service';
 import { StockService } from '../stock/stock.service';
 import { MovementType } from '../stock/stock-movement.schema';
+import { UsersService } from '../users/users.service';
 
 @Injectable()
 export class TransactionsService {
@@ -37,6 +38,7 @@ export class TransactionsService {
     private readonly productService: ProductService,
     private readonly mailService: MailService,
     private readonly stockService: StockService,
+    private readonly usersService: UsersService,
   ) {}
 
   /**
@@ -90,7 +92,8 @@ export class TransactionsService {
 
     return {
       status: 'success',
-      message: 'Transaction de dépôt créée avec succès et en attente d\'approbation',
+      message:
+        "Transaction de dépôt créée avec succès et en attente d'approbation",
       data: [savedTransaction],
       total: 1,
     };
@@ -131,7 +134,8 @@ export class TransactionsService {
 
     return {
       status: 'success',
-      message: 'Transaction de retour créée avec succès et en attente d\'approbation',
+      message:
+        "Transaction de retour créée avec succès et en attente d'approbation",
       data: [savedTransaction],
       total: 1,
     };
@@ -142,6 +146,7 @@ export class TransactionsService {
    */
   async createInitialization(
     createInitDto: CreateInitializationDto,
+    userId: string,
   ): Promise<PaginationResult<TransactionDocument>> {
     const transactionNumber = this.generateTransactionNumber();
 
@@ -149,14 +154,14 @@ export class TransactionsService {
       transactionNumber,
       type: TransactionType.INITIALISATION,
       status: TransactionStatus.PENDING,
-      initiatorId: new Types.ObjectId(createInitDto.ayant_droit),
+      initiatorId: new Types.ObjectId(userId),
       productId: new Types.ObjectId(createInitDto.productId),
       siteOrigineId: new Types.ObjectId(createInitDto.siteOrigineId),
       siteDestinationId: new Types.ObjectId(createInitDto.siteOrigineId),
       quantite: createInitDto.quantite,
       prixUnitaire: createInitDto.prixUnitaire || null,
-      detentaire: new Types.ObjectId(createInitDto.detentaire),
-      ayant_droit: new Types.ObjectId(createInitDto.ayant_droit),
+      detentaire: new Types.ObjectId(userId),
+      ayant_droit: new Types.ObjectId(userId),
       observations: createInitDto.observations || null,
       isActive: true,
     });
@@ -170,7 +175,8 @@ export class TransactionsService {
 
     return {
       status: 'success',
-      message: 'Transaction d\'initialisation créée avec succès et en attente d\'approbation',
+      message:
+        "Transaction d'initialisation créée avec succès et en attente d'approbation",
       data: [savedTransaction],
       total: 1,
     };
@@ -291,12 +297,12 @@ export class TransactionsService {
   /**
    * Applique les mouvements pour un dépôt en créant un StockMovement
    * SOLUTION 1: Utilise StockService pour une source de vérité unique
-   * 
+   *
    * Flux:
    * 1. Transaction approuvée
    * 2. Crée un StockMovement type DEPOT
    * 3. StockMovement crée les actifs/passifs et marque isStocker=true
-   * 
+   *
    * Avantages:
    * - Une SOURCE DE VÉRITÉ (StockMovement)
    * - Traçabilité complète (Transaction + StockMovement lié)
@@ -458,8 +464,8 @@ export class TransactionsService {
         'initiatorId',
         'recipientId',
         'productId',
-        'originSiteId',
-        'destinationSiteId',
+        'siteOrigineId',
+        'siteDestinationId',
       ])
       .exec();
 
@@ -508,8 +514,8 @@ export class TransactionsService {
         'initiatorId',
         'recipientId',
         'productId',
-        'originSiteId',
-        'destinationSiteId',
+        'siteOrigineId',
+        'siteDestinationId',
       ])
       .exec();
 
@@ -537,8 +543,8 @@ export class TransactionsService {
         'initiatorId',
         'recipientId',
         'productId',
-        'originSiteId',
-        'destinationSiteId',
+        'siteOrigineId',
+        'siteDestinationId',
       ])
       .exec();
 
@@ -566,8 +572,8 @@ export class TransactionsService {
         'initiatorId',
         'recipientId',
         'productId',
-        'originSiteId',
-        'destinationSiteId',
+        'siteOrigineId',
+        'siteDestinationId',
       ])
       .exec();
 
@@ -610,8 +616,8 @@ export class TransactionsService {
         'initiatorId',
         'recipientId',
         'productId',
-        'originSiteId',
-        'destinationSiteId',
+        'siteOrigineId',
+        'siteDestinationId',
       ])
       .exec();
 
@@ -639,13 +645,15 @@ export class TransactionsService {
     try {
       const transactionType = this.getTransactionTypeLabel(transaction.type);
 
-      // Récupérer les infos du destinataire de manière simple
-      // Pour l'instant, on utilise l'ID comme email (à améliorer)
-      const recipientEmail = `${transaction.recipientId}@app.local`;
+      // Récupérer les infos du destinataire via la base de données
+      const recipientUser = await this.usersService.getById(
+        transaction.recipientId.toString(),
+      );
+      const recipientEmail = recipientUser.userEmail;
 
       await this.mailService.notificationTransactionApproved(
         recipientEmail,
-        transaction.recipientId.toString(),
+        recipientUser.userName,
         transactionType,
         transaction.productId.toString(),
         transaction.quantite,
@@ -677,12 +685,15 @@ export class TransactionsService {
     try {
       const transactionType = this.getTransactionTypeLabel(transaction.type);
 
-      // Récupérer les infos du destinataire de manière simple
-      const recipientEmail = `${transaction.recipientId}@app.local`;
+      // Récupérer les infos du destinataire via la base de données
+      const recipientUser = await this.usersService.getById(
+        transaction.recipientId.toString(),
+      );
+      const recipientEmail = recipientUser.userEmail;
 
       await this.mailService.notificationTransactionRejected(
         recipientEmail,
-        transaction.recipientId.toString(),
+        recipientUser.userName,
         transactionType,
         transaction.productId.toString(),
         transaction.quantite,
@@ -713,12 +724,15 @@ export class TransactionsService {
     try {
       const transactionType = this.getTransactionTypeLabel(transaction.type);
 
-      // Récupérer les infos du destinataire
-      const recipientEmail = `${transaction.recipientId}@app.local`;
+      // Récupérer les infos du destinataire via la base de données
+      const recipientUser = await this.usersService.getById(
+        transaction.recipientId.toString(),
+      );
+      const recipientEmail = recipientUser.userEmail;
 
       await this.mailService.notificationTransactionCreated(
         recipientEmail,
-        transaction.recipientId.toString(),
+        recipientUser.userName,
         transactionType,
         transaction.productId.toString(),
         transaction.quantite,

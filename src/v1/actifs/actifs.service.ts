@@ -70,6 +70,7 @@ export class ActifsService {
     });
     const actif = await this.actifModel.findOne({
       userId: new Types.ObjectId(userId),
+      depotId: new Types.ObjectId(depotId),
       productId: new Types.ObjectId(productId),
       isActive: true,
     });
@@ -85,7 +86,7 @@ export class ActifsService {
 
     if (!actif || actif.quantite < quantite) {
       throw new NotFoundException(
-        `Stock insuffisant ou actif inexistant. (Demandé: ${quantite}, Dispo: ${actif?.quantite || 0})`,
+        `Stock insuffisant ou actif inexistant. (Demandé: ${quantite}, Dispo: ${actif?.quantite})`,
       );
     }
 
